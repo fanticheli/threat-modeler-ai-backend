@@ -4,6 +4,7 @@ import { MulterModule } from '@nestjs/platform-express';
 import { BullModule } from '@nestjs/bullmq';
 import { UploadController } from './upload.controller';
 import { UploadService } from './upload.service';
+import { ImageQualityService } from './image-quality.service';
 import { Analysis, AnalysisSchema } from '../../schemas/analysis.schema';
 import { ANALYSIS_QUEUE } from '../queue/queue.constants';
 
@@ -20,6 +21,7 @@ import { ANALYSIS_QUEUE } from '../queue/queue.constants';
     }),
   ],
   controllers: [UploadController],
-  providers: [UploadService],
+  providers: [UploadService, ImageQualityService],
+  exports: [ImageQualityService],
 })
 export class UploadModule {}
