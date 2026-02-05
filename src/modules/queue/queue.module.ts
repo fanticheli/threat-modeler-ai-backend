@@ -20,7 +20,8 @@ import { ANALYSIS_QUEUE } from './queue.constants';
             host: configService.get('REDIS_HOST', 'localhost'),
             port: parseInt(configService.get('REDIS_PORT', '6379')),
             password: configService.get('REDIS_PASSWORD'),
-            ...(useTls && { tls: {} }),
+            maxRetriesPerRequest: null,
+            ...(useTls && { tls: { rejectUnauthorized: false } }),
           },
         };
       },
