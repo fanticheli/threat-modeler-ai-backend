@@ -137,6 +137,12 @@ export class Analysis {
   @Prop({ required: true })
   imageName: string;
 
+  @Prop()
+  imageBase64?: string;
+
+  @Prop()
+  imageMimeType?: string;
+
   @Prop({ default: 'pt-BR' })
   language: 'pt-BR' | 'en-US';
 

@@ -1,15 +1,18 @@
 import {
   Controller,
   Post,
+  Get,
+  Param,
   Body,
+  Res,
   UseInterceptors,
   UploadedFile,
   BadRequestException,
+  NotFoundException,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
-import { diskStorage } from 'multer';
-import { extname } from 'path';
-import { v4 as uuidv4 } from 'uuid';
+import { memoryStorage } from 'multer';
+import { Response } from 'express';
 import { UploadService } from './upload.service';
 
 export type AnalysisLanguage = 'pt-BR' | 'en-US';
@@ -21,13 +24,7 @@ export class UploadController {
   @Post()
   @UseInterceptors(
     FileInterceptor('image', {
-      storage: diskStorage({
-        destination: './uploads',
-        filename: (req, file, callback) => {
-          const uniqueName = `${uuidv4()}${extname(file.originalname)}`;
-          callback(null, uniqueName);
-        },
-      }),
+      storage: memoryStorage(),
       fileFilter: (req, file, callback) => {
         if (!file.mimetype.match(/\/(jpg|jpeg|png|gif|webp)$/)) {
           callback(
@@ -55,5 +52,24 @@ export class UploadController {
     const selectedLanguage = validLanguages.includes(language) ? language : 'pt-BR';
 
     return this.uploadService.createAnalysisFromUpload(file, selectedLanguage);
+  }
+
+  @Get('image/:id')
+  async getImage(@Param('id') id: string, @Res() res: Response) {
+    const image = await this.uploadService.getImageById(id);
+
+    if (!image) {
+      throw new NotFoundException('Imagem não encontrada');
+    }
+
+    const buffer = Buffer.from(image.base64, 'base64');
+
+    res.set({
+      'Content-Type': image.mimeType,
+      'Content-Length': buffer.length,
+      'Cache-Control': 'public, max-age=31536000',
+    });
+
+    res.send(buffer);
   }
 }

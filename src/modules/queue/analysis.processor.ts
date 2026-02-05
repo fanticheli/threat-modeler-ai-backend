@@ -4,7 +4,6 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { Job } from 'bullmq';
 import { EventEmitter2 } from '@nestjs/event-emitter';
-import * as path from 'path';
 import { Analysis, AnalysisDocument } from '../../schemas/analysis.schema';
 import { AiService } from '../ai/ai.service';
 import { ANALYSIS_QUEUE } from './queue.constants';
@@ -57,13 +56,17 @@ export class AnalysisProcessor extends WorkerHost {
         percentage: 5,
       });
 
-      const imagePath = path.join(
-        process.cwd(),
-        analysis.imageUrl.replace(/^\//, ''),
-      );
+      if (!analysis.imageBase64) {
+        throw new Error('Image not found in database');
+      }
+
+      const imageData = {
+        base64: analysis.imageBase64,
+        mimeType: analysis.imageMimeType || 'image/jpeg',
+      };
 
       const language = analysis.language || 'pt-BR';
-      const detection = await this.aiService.detectComponents(imagePath, language);
+      const detection = await this.aiService.detectComponents(imageData, language);
       const { components, connections, detectedProvider, existingMitigations } = detection;
 
       await this.updateProgress(analysisId, {

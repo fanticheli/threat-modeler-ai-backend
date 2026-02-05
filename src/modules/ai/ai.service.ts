@@ -1,8 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import Anthropic from '@anthropic-ai/sdk';
-import * as fs from 'fs';
-import * as path from 'path';
 import { buildComponentDetectionPrompt } from './prompts/component-detection';
 import { buildStrideAnalysisPrompt } from './prompts/stride-analysis';
 import {
@@ -26,12 +24,14 @@ export class AiService {
     });
   }
 
-  async detectComponents(imagePath: string, language: 'pt-BR' | 'en-US' = 'pt-BR'): Promise<ComponentDetectionResult> {
-    this.logger.log(`Detecting components from image: ${imagePath} (language: ${language})`);
+  async detectComponents(
+    imageData: { base64: string; mimeType: string },
+    language: 'pt-BR' | 'en-US' = 'pt-BR',
+  ): Promise<ComponentDetectionResult> {
+    this.logger.log(`Detecting components from image (language: ${language})`);
 
-    const imageBuffer = fs.readFileSync(imagePath);
-    const base64Image = imageBuffer.toString('base64');
-    const mediaType = this.getMediaType(imagePath);
+    const base64Image = imageData.base64;
+    const mediaType = imageData.mimeType as 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp';
 
     const response = await this.anthropic.messages.create({
       model: 'claude-sonnet-4-20250514',
@@ -127,9 +127,9 @@ export class AiService {
     return result;
   }
 
-  async performFullAnalysis(imagePath: string): Promise<FullAnalysisResult> {
+  async performFullAnalysis(imageData: { base64: string; mimeType: string }): Promise<FullAnalysisResult> {
     // Step 1: Detect components with provider and existing mitigations
-    const detection = await this.detectComponents(imagePath);
+    const detection = await this.detectComponents(imageData);
     const { components, connections, detectedProvider, existingMitigations } = detection;
 
     // Step 2: Analyze STRIDE for each component (with context)
@@ -168,18 +168,6 @@ export class AiService {
       connections,
       strideAnalysis,
     };
-  }
-
-  private getMediaType(filePath: string): 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp' {
-    const ext = path.extname(filePath).toLowerCase();
-    const mediaTypes: Record<string, 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp'> = {
-      '.png': 'image/png',
-      '.jpg': 'image/jpeg',
-      '.jpeg': 'image/jpeg',
-      '.gif': 'image/gif',
-      '.webp': 'image/webp',
-    };
-    return mediaTypes[ext] || 'image/png';
   }
 
   private parseJsonResponse<T>(content: string): T {

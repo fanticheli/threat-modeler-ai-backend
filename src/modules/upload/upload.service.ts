@@ -18,9 +18,15 @@ export class UploadService {
   ) {}
 
   async createAnalysisFromUpload(file: Express.Multer.File, language: 'pt-BR' | 'en-US' = 'pt-BR') {
+    // Converter imagem para Base64
+    const imageBase64 = file.buffer.toString('base64');
+    const imageMimeType = file.mimetype;
+
     const analysis = new this.analysisModel({
-      imageUrl: `/uploads/${file.filename}`,
+      imageUrl: `/api/upload/image/{id}`, // Será atualizado após salvar
       imageName: file.originalname,
+      imageBase64,
+      imageMimeType,
       language,
       status: 'processing',
       components: [],
@@ -47,6 +53,10 @@ export class UploadService {
     const savedAnalysis = await analysis.save();
     const analysisId = savedAnalysis._id.toString();
 
+    // Atualizar imageUrl com o ID correto
+    savedAnalysis.imageUrl = `/api/upload/image/${analysisId}`;
+    await savedAnalysis.save();
+
     // Adiciona o job à fila automaticamente após o upload
     const job = await this.analysisQueue.add(
       'process-analysis',
@@ -64,6 +74,19 @@ export class UploadService {
       imageUrl: savedAnalysis.imageUrl,
       imageName: savedAnalysis.imageName,
       status: savedAnalysis.status,
+    };
+  }
+
+  async getImageById(id: string) {
+    const analysis = await this.analysisModel.findById(id).select('imageBase64 imageMimeType');
+
+    if (!analysis || !analysis.imageBase64) {
+      return null;
+    }
+
+    return {
+      base64: analysis.imageBase64,
+      mimeType: analysis.imageMimeType || 'image/jpeg',
     };
   }
 }
