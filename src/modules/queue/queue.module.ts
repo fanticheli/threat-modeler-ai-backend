@@ -13,12 +13,17 @@ import { ANALYSIS_QUEUE } from './queue.constants';
     EventEmitterModule.forRoot(),
     BullModule.forRootAsync({
       imports: [ConfigModule],
-      useFactory: (configService: ConfigService) => ({
-        connection: {
-          host: configService.get('REDIS_HOST', 'localhost'),
-          port: configService.get('REDIS_PORT', 6379),
-        },
-      }),
+      useFactory: (configService: ConfigService) => {
+        const useTls = configService.get('REDIS_TLS', 'false') === 'true';
+        return {
+          connection: {
+            host: configService.get('REDIS_HOST', 'localhost'),
+            port: parseInt(configService.get('REDIS_PORT', '6379')),
+            password: configService.get('REDIS_PASSWORD'),
+            ...(useTls && { tls: {} }),
+          },
+        };
+      },
       inject: [ConfigService],
     }),
     BullModule.registerQueue({
