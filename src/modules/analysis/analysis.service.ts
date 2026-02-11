@@ -20,7 +20,7 @@ export class AnalysisService {
   async findAll() {
     return this.analysisModel
       .find()
-      .select('_id imageName status summary progress createdAt')
+      .select('_id imageName imageUrl detectedProvider status summary progress createdAt')
       .sort({ createdAt: -1 })
       .exec();
   }

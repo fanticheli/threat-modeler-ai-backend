@@ -1,0 +1,28 @@
+services:
+  - type: web
+    name: threat-modeler-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    region: oregon
+    plan: starter
+    healthCheckPath: /api
+    envVars:
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: MONGODB_URI
+        sync: false
+      - key: REDIS_HOST
+        sync: false
+      - key: REDIS_PORT
+        value: "6379"
+      - key: REDIS_PASSWORD
+        sync: false
+      - key: REDIS_TLS
+        value: "true"
+      - key: YOLO_SERVICE_URL
+        sync: false
+      - key: YOLO_TIMEOUT_MS
+        value: "30000"
+      - key: PORT
+        value: "3001"

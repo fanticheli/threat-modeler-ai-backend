@@ -66,8 +66,26 @@ export class AnalysisProcessor extends WorkerHost {
       };
 
       const language = analysis.language || 'pt-BR';
-      const detection = await this.aiService.detectComponents(imageData, language);
-      const { components, connections, detectedProvider, existingMitigations } = detection;
+
+      // Pipeline hibrido: YOLO (modelo treinado) + Claude Vision
+      // O performFullAnalysis agora integra ambos os modelos
+      const fullResult = await this.aiService.performFullAnalysis(imageData, language);
+      const {
+        components,
+        connections,
+        detectedProvider,
+        existingMitigations,
+        strideAnalysis,
+        detectionMeta,
+      } = fullResult;
+
+      if (detectionMeta?.yoloAvailable) {
+        this.logger.log(
+          `Deteccao hibrida: YOLO=${detectionMeta.yoloDetections}, ` +
+          `Claude=${detectionMeta.claudeDetections}, ` +
+          `Merged=${detectionMeta.mergedComponents}`,
+        );
+      }
 
       await this.updateProgress(analysisId, {
         step: 'detecting_components',
@@ -76,39 +94,21 @@ export class AnalysisProcessor extends WorkerHost {
         totalComponents: components.length,
       });
 
-      // Step 2: STRIDE Analysis (30-90%)
-      const strideAnalysis: any[] = [];
       const totalToAnalyze = components.length;
 
-      for (let i = 0; i < components.length; i++) {
+      // Emitir progresso durante a analise STRIDE (ja executada dentro de performFullAnalysis)
+      for (let i = 0; i < strideAnalysis.length; i++) {
         const component = components[i];
-        const progressPercent = 30 + Math.round((i / totalToAnalyze) * 60);
-
-        await this.updateProgress(analysisId, {
-          step: 'analyzing_stride',
-          message: `Analisando STRIDE: ${component.name}`,
-          percentage: progressPercent,
-          currentComponent: i + 1,
-          totalComponents: totalToAnalyze,
-        });
-
-        const strideResult = await this.aiService.analyzeStrideForComponent(
-          component,
-          connections,
-          detectedProvider,
-          existingMitigations,
-          language,
-        );
-
-        const threatsWithCountermeasures = strideResult.threats.map(threat => ({
-          ...threat,
-          countermeasures: threat.countermeasures || [],
-        }));
-
-        strideAnalysis.push({
-          componentId: component.id,
-          threats: threatsWithCountermeasures,
-        });
+        if (component) {
+          const progressPercent = 30 + Math.round(((i + 1) / totalToAnalyze) * 60);
+          await this.updateProgress(analysisId, {
+            step: 'analyzing_stride',
+            message: `Analisado STRIDE: ${component.name}`,
+            percentage: progressPercent,
+            currentComponent: i + 1,
+            totalComponents: totalToAnalyze,
+          });
+        }
       }
 
       // Step 3: Generating report (90-100%)
@@ -121,13 +121,14 @@ export class AnalysisProcessor extends WorkerHost {
       // Calculate summary
       const summary = this.calculateSummary({ components, strideAnalysis });
 
-      // Update analysis with results
+      // Update analysis with results (includes detectionMeta)
       await this.analysisModel.findByIdAndUpdate(analysisId, {
         detectedProvider,
         existingMitigations,
         components,
         connections,
         strideAnalysis,
+        detectionMeta,
         summary,
         status: 'completed',
         progress: {

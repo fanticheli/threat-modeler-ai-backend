@@ -31,6 +31,12 @@ export class Component {
 
   @Prop()
   replicaOf?: string;
+
+  @Prop()
+  detectionSource?: 'yolo' | 'claude' | 'hybrid';
+
+  @Prop()
+  yoloConfidence?: number;
 }
 
 @Schema()
@@ -129,6 +135,24 @@ export class Progress {
   updatedAt?: Date;
 }
 
+@Schema()
+export class DetectionMeta {
+  @Prop()
+  yoloAvailable: boolean;
+
+  @Prop({ default: 0 })
+  yoloDetections: number;
+
+  @Prop({ default: 0 })
+  claudeDetections: number;
+
+  @Prop({ default: 0 })
+  mergedComponents: number;
+
+  @Prop()
+  yoloInferenceTimeMs?: number;
+}
+
 @Schema({ timestamps: true })
 export class Analysis {
   @Prop({ required: true })
@@ -172,6 +196,9 @@ export class Analysis {
 
   @Prop({ type: Progress })
   progress: Progress;
+
+  @Prop({ type: DetectionMeta })
+  detectionMeta?: DetectionMeta;
 
   @Prop()
   createdAt?: Date;

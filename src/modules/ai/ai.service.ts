@@ -12,17 +12,25 @@ import {
   ThreatWithCountermeasures,
   FullAnalysisResult,
 } from './interfaces/ai.interfaces';
+import { YoloService, YoloPredictionResponse } from './yolo.service';
 
 @Injectable()
 export class AiService {
   private readonly logger = new Logger(AiService.name);
   private anthropic: Anthropic;
 
-  constructor(private configService: ConfigService) {
+  constructor(
+    private configService: ConfigService,
+    private yoloService: YoloService,
+  ) {
     this.anthropic = new Anthropic({
       apiKey: this.configService.get<string>('ANTHROPIC_API_KEY'),
     });
   }
+
+  // ---------------------------------------------------------------------------
+  // Deteccao de componentes via Claude Vision (existente)
+  // ---------------------------------------------------------------------------
 
   async detectComponents(
     imageData: { base64: string; mimeType: string },
@@ -73,6 +81,10 @@ export class AiService {
 
     return result;
   }
+
+  // ---------------------------------------------------------------------------
+  // Analise STRIDE por componente (existente)
+  // ---------------------------------------------------------------------------
 
   async analyzeStrideForComponent(
     component: DetectedComponent,
@@ -127,16 +139,64 @@ export class AiService {
     return result;
   }
 
-  async performFullAnalysis(imageData: { base64: string; mimeType: string }): Promise<FullAnalysisResult> {
-    // Step 1: Detect components with provider and existing mitigations
-    const detection = await this.detectComponents(imageData);
-    const { components, connections, detectedProvider, existingMitigations } = detection;
+  // ---------------------------------------------------------------------------
+  // Pipeline Hibrido: YOLO (modelo treinado) + Claude Vision
+  // ---------------------------------------------------------------------------
 
-    // Step 2: Analyze STRIDE for each component (with context)
+  /**
+   * Pipeline completo de analise com integracao YOLO + Claude Vision.
+   *
+   * Fluxo:
+   *   1. YOLO detecta componentes (modelo treinado, rapido, bounding boxes precisos)
+   *   2. Claude Vision detecta componentes (LLM, semantica rica, conexoes)
+   *   3. Resultados sao mesclados: YOLO enriquece Claude com confianca e posicao
+   *   4. STRIDE analisa cada componente mesclado
+   *
+   * Se o servico YOLO nao estiver disponivel, cai no fallback so com Claude.
+   */
+  async performFullAnalysis(
+    imageData: { base64: string; mimeType: string },
+    language: 'pt-BR' | 'en-US' = 'pt-BR',
+  ): Promise<FullAnalysisResult> {
+    // --------------------------------------------------
+    // Fase 1: Deteccao YOLO (modelo treinado)
+    // --------------------------------------------------
+    let yoloResult: YoloPredictionResponse | null = null;
+    const yoloAvailable = await this.yoloService.isAvailable();
+
+    if (yoloAvailable) {
+      this.logger.log('YOLO service disponivel - executando deteccao com modelo treinado');
+      yoloResult = await this.yoloService.predict(
+        imageData.base64,
+        imageData.mimeType,
+      );
+      if (yoloResult) {
+        this.logger.log(
+          `YOLO: ${yoloResult.total_detections} deteccoes em ${yoloResult.inference_time_ms}ms`,
+        );
+      }
+    } else {
+      this.logger.log('YOLO service indisponivel - usando apenas Claude Vision');
+    }
+
+    // --------------------------------------------------
+    // Fase 2: Deteccao Claude Vision (LLM)
+    // --------------------------------------------------
+    const claudeDetection = await this.detectComponents(imageData, language);
+    const { components: claudeComponents, connections, detectedProvider, existingMitigations } =
+      claudeDetection;
+
+    // --------------------------------------------------
+    // Fase 3: Merge dos resultados (YOLO + Claude)
+    // --------------------------------------------------
+    const mergedComponents = this.mergeDetections(claudeComponents, yoloResult);
+
+    // --------------------------------------------------
+    // Fase 4: Analise STRIDE para cada componente
+    // --------------------------------------------------
     const strideAnalysis: ComponentStrideAnalysis[] = [];
 
-    for (const component of components) {
-      // Replicas also get their own STRIDE analysis (replication-specific threats)
+    for (const component of mergedComponents) {
       if (component.replicaOf) {
         this.logger.log(`Analyzing replica ${component.name} (replica of ${component.replicaOf})`);
       }
@@ -146,6 +206,7 @@ export class AiService {
         connections,
         detectedProvider,
         existingMitigations,
+        language,
       );
 
       const threatsWithCountermeasures: ThreatWithCountermeasures[] = strideResult.threats.map(
@@ -164,11 +225,104 @@ export class AiService {
     return {
       detectedProvider,
       existingMitigations,
-      components,
+      components: mergedComponents,
       connections,
       strideAnalysis,
+      detectionMeta: {
+        yoloAvailable,
+        yoloDetections: yoloResult?.total_detections ?? 0,
+        claudeDetections: claudeComponents.length,
+        mergedComponents: mergedComponents.length,
+        yoloInferenceTimeMs: yoloResult?.inference_time_ms,
+      },
     };
   }
+
+  // ---------------------------------------------------------------------------
+  // Merge: combina deteccoes do YOLO com as do Claude
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Mescla deteccoes do YOLO com as do Claude Vision.
+   *
+   * Estrategia:
+   *   - Claude Vision eh a fonte principal (semantica rica, conexoes, descricoes)
+   *   - YOLO enriquece componentes do Claude com:
+   *     - detectionSource: 'hybrid' (confirmado por ambos)
+   *     - yoloConfidence: score de confianca do modelo treinado
+   *   - Componentes detectados SOMENTE pelo YOLO (e nao pelo Claude) sao
+   *     adicionados com detectionSource: 'yolo'
+   *   - Componentes detectados SOMENTE pelo Claude mantêm detectionSource: 'claude'
+   *
+   * Matching: compara o type do YOLO (backend_type) com o type do Claude.
+   * Se mais de um YOLO detection casa com o mesmo Claude component,
+   * usa o de maior confianca.
+   */
+  private mergeDetections(
+    claudeComponents: DetectedComponent[],
+    yoloResult: YoloPredictionResponse | null,
+  ): DetectedComponent[] {
+    // Se YOLO nao disponivel, todos os componentes vem do Claude
+    if (!yoloResult || yoloResult.detections.length === 0) {
+      return claudeComponents.map((c) => ({
+        ...c,
+        detectionSource: 'claude' as const,
+      }));
+    }
+
+    const yoloDetections = [...yoloResult.detections];
+    const matchedYoloIndices = new Set<number>();
+
+    // Marcar componentes do Claude com informacao do YOLO
+    const merged: DetectedComponent[] = claudeComponents.map((claudeComp) => {
+      // Procurar match no YOLO pelo tipo
+      const matchIndex = yoloDetections.findIndex(
+        (yolo, idx) =>
+          !matchedYoloIndices.has(idx) && yolo.backend_type === claudeComp.type,
+      );
+
+      if (matchIndex !== -1) {
+        matchedYoloIndices.add(matchIndex);
+        const yoloMatch = yoloDetections[matchIndex];
+        return {
+          ...claudeComp,
+          detectionSource: 'hybrid' as const,
+          yoloConfidence: yoloMatch.confidence,
+        };
+      }
+
+      return {
+        ...claudeComp,
+        detectionSource: 'claude' as const,
+      };
+    });
+
+    // Componentes YOLO sem match no Claude -> adicionar como novos
+    yoloDetections.forEach((yolo, idx) => {
+      if (!matchedYoloIndices.has(idx) && yolo.confidence >= 0.08) {
+        merged.push({
+          id: `yolo-${yolo.class_name}-${idx}`,
+          name: yolo.class_name.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()),
+          type: yolo.backend_type,
+          description: `Componente detectado pelo modelo YOLO treinado (confianca: ${(yolo.confidence * 100).toFixed(1)}%)`,
+          detectionSource: 'yolo' as const,
+          yoloConfidence: yolo.confidence,
+        });
+      }
+    });
+
+    this.logger.log(
+      `Merge: ${merged.filter((c) => c.detectionSource === 'hybrid').length} hybrid, ` +
+        `${merged.filter((c) => c.detectionSource === 'claude').length} claude-only, ` +
+        `${merged.filter((c) => c.detectionSource === 'yolo').length} yolo-only`,
+    );
+
+    return merged;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Utilitarios
+  // ---------------------------------------------------------------------------
 
   private parseJsonResponse<T>(content: string): T {
     try {

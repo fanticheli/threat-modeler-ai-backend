@@ -8,6 +8,10 @@ export interface DetectedComponent {
   existingSecurityControls?: string[];
   isAutoScaling?: boolean;
   replicaOf?: string;
+  /** Indica a origem da deteccao: 'yolo', 'claude', ou 'hybrid' (ambos) */
+  detectionSource?: 'yolo' | 'claude' | 'hybrid';
+  /** Confianca do modelo YOLO (0-1), presente quando detectionSource inclui yolo */
+  yoloConfidence?: number;
 }
 
 export interface DetectedConnection {
@@ -59,4 +63,12 @@ export interface FullAnalysisResult {
   components: DetectedComponent[];
   connections: DetectedConnection[];
   strideAnalysis: ComponentStrideAnalysis[];
+  /** Resumo da deteccao hibrida YOLO + Claude */
+  detectionMeta?: {
+    yoloAvailable: boolean;
+    yoloDetections: number;
+    claudeDetections: number;
+    mergedComponents: number;
+    yoloInferenceTimeMs?: number;
+  };
 }
