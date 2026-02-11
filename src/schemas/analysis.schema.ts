@@ -201,6 +201,9 @@ export class Analysis {
   detectionMeta?: DetectionMeta;
 
   @Prop()
+  executiveSummary?: string;
+
+  @Prop()
   createdAt?: Date;
 
   @Prop()

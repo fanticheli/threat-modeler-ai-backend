@@ -121,6 +121,14 @@ export class AnalysisProcessor extends WorkerHost {
       // Calculate summary
       const summary = this.calculateSummary({ components, strideAnalysis });
 
+      // Generate executive summary (AI-powered, plain language)
+      const executiveSummary = await this.aiService.generateExecutiveSummary({
+        components: components.map(c => ({ name: c.name, type: c.type })),
+        summary,
+        detectedProvider: detectedProvider || 'unknown',
+        language,
+      });
+
       // Update analysis with results (includes detectionMeta)
       await this.analysisModel.findByIdAndUpdate(analysisId, {
         detectedProvider,
@@ -130,6 +138,7 @@ export class AnalysisProcessor extends WorkerHost {
         strideAnalysis,
         detectionMeta,
         summary,
+        executiveSummary,
         status: 'completed',
         progress: {
           step: 'completed',

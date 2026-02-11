@@ -321,6 +321,54 @@ export class AiService {
   }
 
   // ---------------------------------------------------------------------------
+  // Resumo Executivo em linguagem natural
+  // ---------------------------------------------------------------------------
+
+  async generateExecutiveSummary(params: {
+    components: { name: string; type: string }[];
+    summary: { totalThreats: number; criticalThreats: number; highThreats: number; mediumThreats: number; lowThreats: number };
+    detectedProvider: string;
+    language: 'pt-BR' | 'en-US';
+  }): Promise<string> {
+    this.logger.log('Generating executive summary...');
+
+    const lang = params.language === 'pt-BR' ? 'português brasileiro' : 'English';
+    const componentList = params.components.map(c => `${c.name} (${c.type})`).join(', ');
+    const { totalThreats, criticalThreats, highThreats, mediumThreats, lowThreats } = params.summary;
+
+    const prompt = `You are a cybersecurity expert writing an executive summary for a non-technical audience.
+
+Architecture analyzed: provider ${params.detectedProvider}, with the following components: ${componentList}.
+
+Threat analysis results:
+- Total threats: ${totalThreats}
+- Critical: ${criticalThreats}
+- High: ${highThreats}
+- Medium: ${mediumThreats}
+- Low: ${lowThreats}
+
+Write 2-3 paragraphs in ${lang}, in simple language that a business executive can understand.
+Explain what was found, which areas need the most attention, and a general recommendation.
+Do NOT use markdown, bullet points, or technical jargon. Write in plain text paragraphs only.`;
+
+    try {
+      const response = await this.anthropic.messages.create({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 1024,
+        messages: [{ role: 'user', content: prompt }],
+      });
+
+      const content = response.content[0];
+      const text = content.type === 'text' ? content.text : '';
+      this.logger.log('Executive summary generated successfully');
+      return text.trim();
+    } catch (error) {
+      this.logger.error(`Failed to generate executive summary: ${error.message}`);
+      return '';
+    }
+  }
+
+  // ---------------------------------------------------------------------------
   // Utilitarios
   // ---------------------------------------------------------------------------
 
