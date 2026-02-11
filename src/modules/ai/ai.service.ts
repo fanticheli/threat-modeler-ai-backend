@@ -43,7 +43,7 @@ export class AiService {
 
     const response = await this.anthropic.messages.create({
       model: 'claude-sonnet-4-20250514',
-      max_tokens: 4096,
+      max_tokens: 16384,
       messages: [
         {
           role: 'user',
@@ -326,12 +326,15 @@ export class AiService {
 
   private parseJsonResponse<T>(content: string): T {
     try {
-      // Try to extract JSON from markdown code blocks if present
-      const jsonMatch = content.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
-      const jsonString = jsonMatch ? jsonMatch[1] : content;
+      // Strip markdown code blocks (with or without closing ```)
+      let jsonString = content.trim();
+      if (jsonString.startsWith('```')) {
+        jsonString = jsonString.replace(/^```(?:json)?\s*/, '');
+        jsonString = jsonString.replace(/\s*```\s*$/, '');
+      }
       return JSON.parse(jsonString.trim());
     } catch (error) {
-      this.logger.error(`Failed to parse JSON response: ${content}`);
+      this.logger.error(`Failed to parse JSON response: ${content.substring(0, 200)}...`);
       return {} as T;
     }
   }
