@@ -132,8 +132,18 @@ export class YoloService {
 
       const result: YoloPredictionResponse = await response.json();
 
+      // Breakdown de deteccoes por classe
+      const classCounts: Record<string, number> = {};
+      for (const det of result.detections) {
+        classCounts[det.class_name] = (classCounts[det.class_name] || 0) + 1;
+      }
+      const breakdown = Object.entries(classCounts)
+        .sort(([, a], [, b]) => b - a)
+        .map(([name, count]) => `${name}:${count}`)
+        .join(', ');
+
       this.logger.log(
-        `YOLO detectou ${result.total_detections} componentes em ${result.inference_time_ms}ms`,
+        `YOLO: ${result.total_detections} deteccoes em ${result.inference_time_ms}ms (${breakdown})`,
       );
 
       return result;

@@ -1,6 +1,6 @@
 # Threat Modeler AI - Backend
 
-API para o Threat Modeler AI, uma ferramenta de modelagem de ameaças automatizada usando Claude Vision e metodologia STRIDE.
+API para o Threat Modeler AI, uma ferramenta de modelagem de ameacas automatizada usando pipeline hibrido (YOLO + Claude Vision) e metodologia STRIDE.
 
 ## Tech Stack
 
@@ -14,8 +14,8 @@ API para o Threat Modeler AI, uma ferramenta de modelagem de ameaças automatiza
 ## Funcionalidades
 
 - Upload e armazenamento de imagens
-- Detecção de componentes via Claude Vision
-- Análise STRIDE por componente
+- Deteccao hibrida de componentes (YOLO + Claude Vision)
+- Analise STRIDE por componente
 - Processamento assíncrono com fila
 - Geração de relatórios (PDF, JSON, Markdown)
 - Suporte multi-idioma (pt-BR, en-US)
@@ -31,7 +31,7 @@ API para o Threat Modeler AI, uma ferramenta de modelagem de ameaças automatiza
 
 ```bash
 # Clone o repositório
-git clone https://github.com/SEU_USUARIO/threat-modeler-ai-backend.git
+git clone https://github.com/fanticheli/threat-modeler-ai-backend.git
 cd threat-modeler-ai-backend
 
 # Instale as dependências
@@ -60,8 +60,6 @@ REDIS_PORT=6379
 | `npm run start:dev` | Inicia em modo desenvolvimento |
 | `npm run build` | Build de produção |
 | `npm run start:prod` | Inicia servidor de produção |
-| `npm run lint` | Executa linter |
-| `npm run test` | Executa testes |
 
 ## Docker
 
@@ -89,7 +87,10 @@ docker-compose up -d
 | Método | Endpoint | Descrição |
 |--------|----------|-----------|
 | POST | `/api/upload` | Upload de imagem |
+| POST | `/api/upload/validate` | Validar qualidade da imagem |
+| GET | `/api/upload/image/:id` | Servir imagem por ID |
 | GET | `/api/analysis` | Listar análises |
+| GET | `/api/analysis/queue-status` | Status da fila de processamento |
 | GET | `/api/analysis/:id` | Buscar análise |
 | POST | `/api/analysis/:id/process` | Iniciar processamento |
 | GET | `/api/analysis/:id/progress` | Status do progresso |
@@ -108,7 +109,8 @@ src/
 ├── modules/
 │   ├── upload/                # Upload de imagens
 │   ├── analysis/              # CRUD de análises
-│   ├── ai/                    # Integração Claude Vision
+│   ├── ai/                    # Pipeline hibrido (YOLO + Claude Vision)
+│   │   ├── yolo.service.ts    # Client HTTP para YOLO service
 │   │   └── prompts/           # Prompts de IA
 │   ├── queue/                 # BullMQ processor
 │   └── report/                # Geração de relatórios
@@ -117,7 +119,7 @@ src/
 
 ## Repositórios Relacionados
 
-- [threat-modeler-ai-frontend](https://github.com/SEU_USUARIO/threat-modeler-ai-frontend) - UI Next.js
+- [threat-modeler-ai-frontend](https://github.com/fanticheli/threat-modeler-ai-frontend) - UI React + Vite
 
 ## Licença
 

@@ -36,7 +36,8 @@ export class AnalysisProcessor extends WorkerHost {
 
   async process(job: Job<AnalysisJobData>): Promise<void> {
     const { analysisId } = job.data;
-    this.logger.log(`Processing analysis job: ${analysisId}`);
+    const jobStart = Date.now();
+    this.logger.log(`[Job] ▶ Iniciando processamento da analise ${analysisId}`);
 
     const analysis = await this.analysisModel.findById(analysisId).exec();
     if (!analysis) {
@@ -158,9 +159,16 @@ export class AnalysisProcessor extends WorkerHost {
         totalComponents: totalToAnalyze,
       });
 
-      this.logger.log(`Analysis ${analysisId} completed successfully`);
+      const jobTime = Date.now() - jobStart;
+      const minutes = Math.floor(jobTime / 60000);
+      const seconds = ((jobTime % 60000) / 1000).toFixed(1);
+      this.logger.log(
+        `[Job] ✓ Analise ${analysisId} concluida em ${minutes}m${seconds}s | ` +
+          `${components.length} componentes, ${summary.totalThreats} ameacas`,
+      );
     } catch (error) {
-      this.logger.error(`Analysis ${analysisId} failed: ${error.message}`);
+      const jobTime = Date.now() - jobStart;
+      this.logger.error(`[Job] ✗ Analise ${analysisId} falhou apos ${Math.round(jobTime / 1000)}s: ${error.message}`);
 
       await this.analysisModel.findByIdAndUpdate(analysisId, {
         status: 'failed',

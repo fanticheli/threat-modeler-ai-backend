@@ -29,6 +29,40 @@ export class AiService {
   }
 
   // ---------------------------------------------------------------------------
+  // Retry com backoff exponencial + delay entre chamadas
+  // ---------------------------------------------------------------------------
+
+  private async callWithRetry<T>(
+    fn: () => Promise<T>,
+    label: string,
+    maxRetries = 3,
+  ): Promise<T> {
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        return await fn();
+      } catch (error) {
+        const is529 = error?.status === 529 || String(error).includes('529');
+        const isRetryable = is529 || error?.status === 500 || error?.status === 503;
+
+        if (!isRetryable || attempt === maxRetries) {
+          throw error;
+        }
+
+        const delay = attempt * 5000; // 5s, 10s, 15s
+        this.logger.warn(
+          `[Retry]    ⟳ ${label} — tentativa ${attempt}/${maxRetries} falhou (${error?.status || 'error'}), aguardando ${delay / 1000}s...`,
+        );
+        await this.sleep(delay);
+      }
+    }
+    throw new Error('Unreachable');
+  }
+
+  private sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  // ---------------------------------------------------------------------------
   // Deteccao de componentes via Claude Vision (existente)
   // ---------------------------------------------------------------------------
 
@@ -41,29 +75,33 @@ export class AiService {
     const base64Image = imageData.base64;
     const mediaType = imageData.mimeType as 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp';
 
-    const response = await this.anthropic.messages.create({
-      model: 'claude-sonnet-4-20250514',
-      max_tokens: 16384,
-      messages: [
-        {
-          role: 'user',
-          content: [
+    const response = await this.callWithRetry(
+      () =>
+        this.anthropic.messages.create({
+          model: 'claude-sonnet-4-20250514',
+          max_tokens: 16384,
+          messages: [
             {
-              type: 'image',
-              source: {
-                type: 'base64',
-                media_type: mediaType,
-                data: base64Image,
-              },
-            },
-            {
-              type: 'text',
-              text: buildComponentDetectionPrompt(language),
+              role: 'user',
+              content: [
+                {
+                  type: 'image',
+                  source: {
+                    type: 'base64',
+                    media_type: mediaType,
+                    data: base64Image,
+                  },
+                },
+                {
+                  type: 'text',
+                  text: buildComponentDetectionPrompt(language),
+                },
+              ],
             },
           ],
-        },
-      ],
-    });
+        }),
+      'Claude Vision',
+    );
 
     const content = response.content[0];
     const text = content.type === 'text' ? content.text : '{}';
@@ -114,16 +152,20 @@ export class AiService {
       language,
     );
 
-    const response = await this.anthropic.messages.create({
-      model: 'claude-sonnet-4-20250514',
-      max_tokens: 2048,
-      messages: [
-        {
-          role: 'user',
-          content: prompt,
-        },
-      ],
-    });
+    const response = await this.callWithRetry(
+      () =>
+        this.anthropic.messages.create({
+          model: 'claude-sonnet-4-20250514',
+          max_tokens: 2048,
+          messages: [
+            {
+              role: 'user',
+              content: prompt,
+            },
+          ],
+        }),
+      `STRIDE ${component.name}`,
+    );
 
     const content = response.content[0];
     const text = content.type === 'text' ? content.text : '{}';
@@ -158,48 +200,63 @@ export class AiService {
     imageData: { base64: string; mimeType: string },
     language: 'pt-BR' | 'en-US' = 'pt-BR',
   ): Promise<FullAnalysisResult> {
+    const pipelineStart = Date.now();
+    this.logger.log(`[Pipeline] ▶ Iniciando analise (idioma: ${language})`);
+
     // --------------------------------------------------
     // Fase 1: Deteccao YOLO (modelo treinado)
     // --------------------------------------------------
+    this.logger.log('[Pipeline] ▶ Fase 1: YOLO Service...');
     let yoloResult: YoloPredictionResponse | null = null;
     const yoloAvailable = await this.yoloService.isAvailable();
 
     if (yoloAvailable) {
-      this.logger.log('YOLO service disponivel - executando deteccao com modelo treinado');
+      const yoloStart = Date.now();
       yoloResult = await this.yoloService.predict(
         imageData.base64,
         imageData.mimeType,
       );
+      const yoloTime = Date.now() - yoloStart;
       if (yoloResult) {
         this.logger.log(
-          `YOLO: ${yoloResult.total_detections} deteccoes em ${yoloResult.inference_time_ms}ms`,
+          `[YOLO]     ✓ ${yoloResult.total_detections} deteccoes em ${yoloResult.inference_time_ms}ms (round-trip: ${yoloTime}ms)`,
         );
+      } else {
+        this.logger.warn('[YOLO]     ✗ Falha na deteccao (retorno nulo)');
       }
     } else {
-      this.logger.log('YOLO service indisponivel - usando apenas Claude Vision');
+      this.logger.log('[YOLO]     ✗ Servico indisponivel — fallback para Claude Vision');
     }
 
     // --------------------------------------------------
     // Fase 2: Deteccao Claude Vision (LLM)
     // --------------------------------------------------
+    this.logger.log('[Pipeline] ▶ Fase 2: Claude Vision...');
+    const claudeStart = Date.now();
     const claudeDetection = await this.detectComponents(imageData, language);
+    const claudeTime = Date.now() - claudeStart;
     const { components: claudeComponents, connections, detectedProvider, existingMitigations } =
       claudeDetection;
+    this.logger.log(
+      `[Claude]   ✓ ${claudeComponents.length} componentes detectados em ${claudeTime}ms (provider: ${detectedProvider})`,
+    );
 
     // --------------------------------------------------
     // Fase 3: Merge dos resultados (YOLO + Claude)
     // --------------------------------------------------
+    this.logger.log('[Pipeline] ▶ Fase 3: Merge...');
     const mergedComponents = this.mergeDetections(claudeComponents, yoloResult);
 
     // --------------------------------------------------
-    // Fase 4: Analise STRIDE para cada componente
+    // Fase 4: Analise STRIDE para cada componente (paralelo em batches)
     // --------------------------------------------------
-    const strideAnalysis: ComponentStrideAnalysis[] = [];
+    const STRIDE_CONCURRENCY = 5;
+    this.logger.log(
+      `[Pipeline] ▶ Fase 4: STRIDE (${mergedComponents.length} componentes, ${STRIDE_CONCURRENCY} paralelos)...`,
+    );
 
-    for (const component of mergedComponents) {
-      if (component.replicaOf) {
-        this.logger.log(`Analyzing replica ${component.name} (replica of ${component.replicaOf})`);
-      }
+    const strideTasks = mergedComponents.map((component) => async (): Promise<ComponentStrideAnalysis> => {
+      const strideStart = Date.now();
 
       const strideResult = await this.analyzeStrideForComponent(
         component,
@@ -208,6 +265,7 @@ export class AiService {
         existingMitigations,
         language,
       );
+      const strideTime = Date.now() - strideStart;
 
       const threatsWithCountermeasures: ThreatWithCountermeasures[] = strideResult.threats.map(
         (threat) => ({
@@ -216,11 +274,46 @@ export class AiService {
         }),
       );
 
-      strideAnalysis.push({
-        componentId: component.id,
-        threats: threatsWithCountermeasures,
-      });
+      const sevCounts = { critical: 0, high: 0, medium: 0, low: 0 };
+      for (const t of threatsWithCountermeasures) {
+        if (t.severity in sevCounts) sevCounts[t.severity]++;
+      }
+      const sevBreakdown = Object.entries(sevCounts)
+        .filter(([, v]) => v > 0)
+        .map(([k, v]) => `${v} ${k}`)
+        .join(', ');
+
+      this.logger.log(
+        `[STRIDE]   ✓ ${component.name} — ${threatsWithCountermeasures.length} ameacas (${sevBreakdown}) [${strideTime}ms]`,
+      );
+
+      return { componentId: component.id, threats: threatsWithCountermeasures };
+    });
+
+    const strideAnalysis: ComponentStrideAnalysis[] = [];
+    for (let i = 0; i < strideTasks.length; i += STRIDE_CONCURRENCY) {
+      const batch = strideTasks.slice(i, i + STRIDE_CONCURRENCY);
+      const batchNum = Math.floor(i / STRIDE_CONCURRENCY) + 1;
+      const totalBatches = Math.ceil(strideTasks.length / STRIDE_CONCURRENCY);
+      this.logger.log(`[STRIDE]   ▶ Batch ${batchNum}/${totalBatches} (${batch.length} componentes em paralelo)`);
+      const batchResults = await Promise.all(batch.map((fn) => fn()));
+      strideAnalysis.push(...batchResults);
     }
+
+    // Resumo final do pipeline
+    const totalThreats = strideAnalysis.reduce((sum, s) => sum + s.threats.length, 0);
+    const allThreats = strideAnalysis.flatMap((s) => s.threats);
+    const finalSev = {
+      critical: allThreats.filter((t) => t.severity === 'critical').length,
+      high: allThreats.filter((t) => t.severity === 'high').length,
+      medium: allThreats.filter((t) => t.severity === 'medium').length,
+      low: allThreats.filter((t) => t.severity === 'low').length,
+    };
+    const pipelineTime = Date.now() - pipelineStart;
+    this.logger.log(
+      `[Pipeline] ✓ Analise completa! ${mergedComponents.length} componentes, ${totalThreats} ameacas ` +
+        `(${finalSev.critical} critical, ${finalSev.high} high, ${finalSev.medium} medium, ${finalSev.low} low) [${pipelineTime}ms]`,
+    );
 
     return {
       detectedProvider,
@@ -311,11 +404,19 @@ export class AiService {
       }
     });
 
+    const hybridComps = merged.filter((c) => c.detectionSource === 'hybrid');
+    const claudeOnlyComps = merged.filter((c) => c.detectionSource === 'claude');
+    const yoloOnlyComps = merged.filter((c) => c.detectionSource === 'yolo');
+
     this.logger.log(
-      `Merge: ${merged.filter((c) => c.detectionSource === 'hybrid').length} hybrid, ` +
-        `${merged.filter((c) => c.detectionSource === 'claude').length} claude-only, ` +
-        `${merged.filter((c) => c.detectionSource === 'yolo').length} yolo-only`,
+      `[Merge]    ✓ ${merged.length} componentes (${hybridComps.length} hybrid, ${claudeOnlyComps.length} claude, ${yoloOnlyComps.length} yolo)`,
     );
+    if (hybridComps.length > 0) {
+      this.logger.log(`[Merge]      hybrid: ${hybridComps.map((c) => c.name).join(', ')}`);
+    }
+    if (yoloOnlyComps.length > 0) {
+      this.logger.log(`[Merge]      yolo-only: ${yoloOnlyComps.map((c) => c.name).join(', ')}`);
+    }
 
     return merged;
   }
@@ -352,11 +453,15 @@ Explain what was found, which areas need the most attention, and a general recom
 Do NOT use markdown, bullet points, or technical jargon. Write in plain text paragraphs only.`;
 
     try {
-      const response = await this.anthropic.messages.create({
-        model: 'claude-sonnet-4-20250514',
-        max_tokens: 1024,
-        messages: [{ role: 'user', content: prompt }],
-      });
+      const response = await this.callWithRetry(
+        () =>
+          this.anthropic.messages.create({
+            model: 'claude-sonnet-4-20250514',
+            max_tokens: 1024,
+            messages: [{ role: 'user', content: prompt }],
+          }),
+        'Executive Summary',
+      );
 
       const content = response.content[0];
       const text = content.type === 'text' ? content.text : '';
@@ -373,17 +478,96 @@ Do NOT use markdown, bullet points, or technical jargon. Write in plain text par
   // ---------------------------------------------------------------------------
 
   private parseJsonResponse<T>(content: string): T {
-    try {
-      // Strip markdown code blocks (with or without closing ```)
-      let jsonString = content.trim();
-      if (jsonString.startsWith('```')) {
-        jsonString = jsonString.replace(/^```(?:json)?\s*/, '');
-        jsonString = jsonString.replace(/\s*```\s*$/, '');
-      }
-      return JSON.parse(jsonString.trim());
-    } catch (error) {
-      this.logger.error(`Failed to parse JSON response: ${content.substring(0, 200)}...`);
-      return {} as T;
+    let jsonString = content.trim();
+
+    // 1. Extrair conteúdo de markdown code block se presente (```json ... ``` ou ``` ... ```)
+    const codeBlockMatch = jsonString.match(/```(?:json|typescript|js)?\s*\n?([\s\S]*?)\n?\s*```/);
+    if (codeBlockMatch) {
+      jsonString = codeBlockMatch[1].trim();
+    } else {
+      // Fallback: remover fences individuais (abertura ou fechamento sem par)
+      jsonString = jsonString.replace(/^```(?:json|typescript|js)?\s*\n?/i, '');
+      jsonString = jsonString.replace(/\n?\s*```\s*$/i, '');
+      jsonString = jsonString.trim();
     }
+
+    // 2. Extrair JSON: encontrar o primeiro { ou [ e pegar tudo a partir dele
+    const firstBrace = jsonString.indexOf('{');
+    const firstBracket = jsonString.indexOf('[');
+    let startIdx = -1;
+    if (firstBrace === -1) startIdx = firstBracket;
+    else if (firstBracket === -1) startIdx = firstBrace;
+    else startIdx = Math.min(firstBrace, firstBracket);
+
+    if (startIdx > 0) {
+      jsonString = jsonString.substring(startIdx);
+    }
+
+    // 3. Tentar parse direto
+    try {
+      return JSON.parse(jsonString);
+    } catch {
+      // ignorar, tentar reparar
+    }
+
+    // 4. Reparar JSON truncado: fechar colchetes e chaves faltantes
+    try {
+      let repaired = jsonString;
+
+      // Remover trailing comma antes de fechar
+      repaired = repaired.replace(/,\s*$/, '');
+
+      // Remover string truncada no final (aberta sem fechar)
+      repaired = repaired.replace(/,?\s*"[^"]*$/, '');
+
+      // Contar chaves e colchetes abertos
+      let openBraces = 0;
+      let openBrackets = 0;
+      let inString = false;
+      let escape = false;
+
+      for (const char of repaired) {
+        if (escape) { escape = false; continue; }
+        if (char === '\\') { escape = true; continue; }
+        if (char === '"') { inString = !inString; continue; }
+        if (inString) continue;
+        if (char === '{') openBraces++;
+        if (char === '}') openBraces--;
+        if (char === '[') openBrackets++;
+        if (char === ']') openBrackets--;
+      }
+
+      // Fechar o que ficou aberto
+      while (openBrackets > 0) { repaired += ']'; openBrackets--; }
+      while (openBraces > 0) { repaired += '}'; openBraces--; }
+
+      const result = JSON.parse(repaired);
+      this.logger.warn(`[Parser] JSON reparado (truncado pelo modelo) — dados parciais recuperados`);
+      return result;
+    } catch {
+      // ignorar, tentar ultima alternativa
+    }
+
+    // 5. Ultima tentativa: extrair o maior bloco JSON valido
+    try {
+      // Encontrar o ultimo } ou ] valido de tras pra frente
+      for (let end = jsonString.length; end > 0; end--) {
+        const char = jsonString[end - 1];
+        if (char === '}' || char === ']') {
+          try {
+            const result = JSON.parse(jsonString.substring(0, end));
+            this.logger.warn(`[Parser] JSON parcial recuperado (cortado na posicao ${end})`);
+            return result;
+          } catch {
+            continue;
+          }
+        }
+      }
+    } catch {
+      // ignorar
+    }
+
+    this.logger.error(`[Parser] Falha ao parsear JSON — resposta descartada: ${content.substring(0, 200)}...`);
+    return {} as T;
   }
 }
